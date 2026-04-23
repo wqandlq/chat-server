@@ -1,0 +1,4 @@
+/home/wangq/chat-server/build/CMakeFiles/server.dir
+/home/wangq/chat-server/build/CMakeFiles/client.dir
+/home/wangq/chat-server/build/CMakeFiles/edit_cache.dir
+/home/wangq/chat-server/build/CMakeFiles/rebuild_cache.dir
