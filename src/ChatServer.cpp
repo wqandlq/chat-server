@@ -2,42 +2,38 @@
 
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <cerrno>
 #include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
-ChatServer::ChatServer(int port)
-    : port_(port), listenfd_(-1), epfd_(-1)
-{
-}
+ChatServer::ChatServer(int port) : port_(port), listenfd_(-1), epfd_(-1) {}
 
-ChatServer::~ChatServer()
-{
-    for (int fd : clients_)
-    {
+ChatServer::~ChatServer() {
+    for (int fd : clients_) {
         close(fd);
     }
 
-    if (listenfd_ != -1)
-    {
+    if (listenfd_ != -1) {
         close(listenfd_);
     }
 
-    if (epfd_ != -1)
-    {
+    if (epfd_ != -1) {
         close(epfd_);
     }
 }
 
-void ChatServer::start()
-{
+void ChatServer::start() {
+    threadPool_.setMode(MODE_FIXED);
+    threadPool_.start(4);
+
     initSocket();
     initEpoll();
 
@@ -45,35 +41,27 @@ void ChatServer::start()
 
     epoll_event events[1024];
 
-    while (true)
-    {
+    while (true) {
         int nfds = epoll_wait(epfd_, events, 1024, -1);
-        if (nfds == -1)
-        {
+        if (nfds == -1) {
             throw std::runtime_error("epoll_wait failed");
         }
 
-        for (int i = 0; i < nfds; ++i)
-        {
+        for (int i = 0; i < nfds; ++i) {
             int fd = events[i].data.fd;
 
-            if (fd == listenfd_)
-            {
+            if (fd == listenfd_) {
                 handleNewConnection();
-            }
-            else
-            {
+            } else {
                 handleClientMessage(fd);
             }
         }
     }
 }
 
-void ChatServer::initSocket()
-{
+void ChatServer::initSocket() {
     listenfd_ = socket(AF_INET, SOCK_STREAM, 0);
-    if (listenfd_ == -1)
-    {
+    if (listenfd_ == -1) {
         throw std::runtime_error("socket create failed");
     }
 
@@ -85,22 +73,19 @@ void ChatServer::initSocket()
     serverAddr.sin_port = htons(port_);
     serverAddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    if (bind(listenfd_, reinterpret_cast<sockaddr *>(&serverAddr), sizeof(serverAddr)) == -1)
-    {
+    if (bind(listenfd_, reinterpret_cast<sockaddr*>(&serverAddr),
+             sizeof(serverAddr)) == -1) {
         throw std::runtime_error("bind failed");
     }
 
-    if (listen(listenfd_, 128) == -1)
-    {
+    if (listen(listenfd_, 128) == -1) {
         throw std::runtime_error("listen failed");
     }
 }
 
-void ChatServer::initEpoll()
-{
+void ChatServer::initEpoll() {
     epfd_ = epoll_create1(0);
-    if (epfd_ == -1)
-    {
+    if (epfd_ == -1) {
         throw std::runtime_error("epoll_create1 failed");
     }
 
@@ -109,25 +94,21 @@ void ChatServer::initEpoll()
     ev.events = EPOLLIN | EPOLLET;
     ev.data.fd = listenfd_;
 
-    if (epoll_ctl(epfd_, EPOLL_CTL_ADD, listenfd_, &ev) == -1)
-    {
+    if (epoll_ctl(epfd_, EPOLL_CTL_ADD, listenfd_, &ev) == -1) {
         throw std::runtime_error("epoll_ctl add listenfd failed");
     }
 }
 
-void ChatServer::handleNewConnection()
-{
-    while (true)
-    {
+void ChatServer::handleNewConnection() {
+    while (true) {
         sockaddr_in clientAddr;
         std::memset(&clientAddr, 0, sizeof(clientAddr));
         socklen_t clientLen = sizeof(clientAddr);
 
-        int connfd = accept(listenfd_, reinterpret_cast<sockaddr *>(&clientAddr), &clientLen);
-        if (connfd == -1)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
+        int connfd = accept(listenfd_, reinterpret_cast<sockaddr*>(&clientAddr),
+                            &clientLen);
+        if (connfd == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
             }
             std::cerr << "accept failed\n";
@@ -140,55 +121,45 @@ void ChatServer::handleNewConnection()
         inet_ntop(AF_INET, &clientAddr.sin_addr, clientIp, sizeof(clientIp));
         std::cout << "new client connected, connfd = " << connfd
                   << ", ip = " << clientIp
-                  << ", port = " << ntohs(clientAddr.sin_port)
-                  << std::endl;
+                  << ", port = " << ntohs(clientAddr.sin_port) << std::endl;
 
         epoll_event clientEv;
         std::memset(&clientEv, 0, sizeof(clientEv));
         clientEv.events = EPOLLIN | EPOLLET;
         clientEv.data.fd = connfd;
 
-        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, connfd, &clientEv) == -1)
-        {
+        if (epoll_ctl(epfd_, EPOLL_CTL_ADD, connfd, &clientEv) == -1) {
             std::cerr << "epoll_ctl add connfd failed\n";
             close(connfd);
             continue;
         }
-        clients_.insert(connfd);
+        {
+            std::lock_guard<std::mutex> lock(clientMtx_);
+            clients_.insert(connfd);
+        }
     }
 }
 
-void ChatServer::handleClientMessage(int fd)
-{
-    while (true)
-    {
+void ChatServer::handleClientMessage(int fd) {
+    while (true) {
         char buffer[1024] = {0};
         int ret = recv(fd, buffer, sizeof(buffer) - 1, 0);
 
-        if (ret > 0)
-        {
-            std::string msg = "client[" + std::to_string(fd) + "]: " + std::string(buffer);
+        if (ret > 0) {
+            std::string msg =
+                "client[" + std::to_string(fd) + "]: " + std::string(buffer);
 
             std::cout << msg << std::endl;
-            
-            for (int clientfd : clients_)
-            {
-                if (clientfd != fd)
-                {
-                    send(clientfd, msg.c_str(), msg.size(), 0);
-                }
-            }
-        }
-        else if (ret == 0)
-        {
+
+            threadPool_.submitTask(
+                [this, fd, msg]() { broadcastMessage(fd, msg); });
+
+        } else if (ret == 0) {
             std::cout << "client[" << fd << "] closed connection\n";
             removeClient(fd);
             break;
-        }
-        else
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
+        } else {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 break;
             }
 
@@ -199,23 +170,37 @@ void ChatServer::handleClientMessage(int fd)
     }
 }
 
-void ChatServer::removeClient(int fd)
-{
-    clients_.erase(fd);
+void ChatServer::removeClient(int fd) {
+    {
+        std::lock_guard<std::mutex> lock(clientMtx_);
+        clients_.erase(fd);
+    }
     epoll_ctl(epfd_, EPOLL_CTL_DEL, fd, nullptr);
     close(fd);
 }
 
-void ChatServer::setNonBlocking(int fd)
-{
+void ChatServer::setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1)
-    {
+    if (flags == -1) {
         throw std::runtime_error("fcntl F_GETFL failed");
     }
 
-    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
-    {
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1) {
         throw std::runtime_error("fcntl F_SETFD failed");
+    }
+}
+
+void ChatServer::broadcastMessage(int senderFd, const std::string& msg) {
+    std::vector<int> targets;
+    {
+        std::lock_guard<std::mutex> lock(clientMtx_);
+        for (int clientfd : clients_) {
+            if (clientfd != senderFd) {
+                targets.push_back(clientfd);
+            }
+        }
+    }
+    for (int clientfd : targets) {
+        send(clientfd, msg.c_str(), msg.size(), 0);
     }
 }

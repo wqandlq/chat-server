@@ -1,0 +1,11 @@
+---
+Language: Cpp
+BasedOnStyle: Google
+# 强制 Lambda 表达式的格式化
+AllowShortLambdasOnASingleLine: All
+# 缩进宽度
+IndentWidth: 4
+# 大括号换行风格
+BreakBeforeBraces: Custom
+BraceWrapping:
+  BeforeLambdaBody: false
